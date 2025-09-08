@@ -7,7 +7,8 @@ import sys
 from PIL import Image, ImageTk
 import piexif
 from pyquaternion import Quaternion
-from plot_gps import plotting
+from plot_maps import plot_google_maps
+from plot_cad import plot_cad_map
 
 # ---------------- Camera Parameters ----------------
 K = np.array([[765.0, 0, 320.0],
@@ -379,7 +380,13 @@ if __name__ == "__main__":
         except Exception as e:
             corner_gps.append(None)
 
-    plotting(
+    plot_google_maps(
+        target_gps=target_gps,
+        corner_gps=corner_gps,
+        drone_gps=drone_gps
+    )
+
+    plot_cad_map(
         target_gps=target_gps,
         corner_gps=corner_gps,
         drone_gps=drone_gps
