@@ -21,14 +21,14 @@ K = np.array([[765.0, 0, 320.0],
 
 
 # --- drift / correction in (Forward, Right, Up) depending on drone heading ---
-corr_forward = -13.0
-corr_right   = -18.0 
+corr_forward = -12.8
+corr_right   = -16.5 
 corr_up      = 0.0
 
 
 
 # ---------------- Load DEM ----------------
-dem_path = "output_SRTMGL1Ellip.tif"
+dem_path = "output_hh.tif"
 dem = rasterio.open(dem_path)
 
 
@@ -80,10 +80,15 @@ def load_image():
     return img, file_path
 
 def parse_description_from_exif(exif_dict):
+    """
+    Extract yaw, pitch, and roll from the ImageDescription in EXIF.
+    """
     desc = exif_dict.get('0th', {}).get(piexif.ImageIFD.ImageDescription, b'')
     if isinstance(desc, bytes):
         desc = desc.decode(errors='ignore')
-    yaw = pitch = roll = alt_above_ground = None
+
+    yaw = pitch = roll = None
+
     if desc:
         for part in str(desc).split(","):
             kv = part.strip().split("=")
@@ -97,13 +102,14 @@ def parse_description_from_exif(exif_dict):
                         pitch = float(value)
                     elif key_lower == "roll":
                         roll = float(value)
-                    elif key_lower in ["relativealt", "talt", "alt_above_ground"]:
-                        alt_above_ground = float(value)
                 except ValueError:
                     pass
-    if yaw is None or pitch is None or roll is None or alt_above_ground is None:
-        raise ValueError("Missing yaw, pitch, roll, or alt_above_ground in image description.")
-    return yaw, pitch, roll, alt_above_ground
+
+    if yaw is None or pitch is None or roll is None:
+        raise ValueError("Missing yaw, pitch, or roll in image description.")
+
+    return yaw, pitch, roll
+
 
 def extract_gps_from_exif(exif_dict):
     gps_ifd = exif_dict.get("GPS", {})
@@ -208,11 +214,11 @@ def latlon_apply_heading_offset(lat, lon, yaw_deg, forward_m=0.0, right_m=0.0, u
     return lat_c, lon_c, utm_corrected
 
 def pixel_to_ENU_quat(u, v, drone_gps, drone_alt, yaw, pitch, roll, K=K,
-    corr_forward_m=0.0, corr_right_m=0.0, corr_up_m=0.0):
+    corr_forward_m=0.0, corr_right_m=0.0, corr_up_m=0.0,
+    panel_height_m=1.0):  # optional: add height of solar panels
     dir_cam = pixel_dir_from_K(u, v, K)
     R = rotation_matrix_from_rpy(roll, pitch, yaw)
     dir_enu = R @ dir_cam
-
 
     drone_lat, drone_lon = drone_gps
     zone = int((drone_lon + 180.0) / 6.0) + 1
@@ -221,22 +227,27 @@ def pixel_to_ENU_quat(u, v, drone_gps, drone_alt, yaw, pitch, roll, K=K,
     t_to_utm = pyproj.Transformer.from_crs("EPSG:4326", utm_crs, always_xy=True)
     t_from_utm = pyproj.Transformer.from_crs(utm_crs, "EPSG:4326", always_xy=True)
 
-
     # Convert drone GPS to UTM
     UTM_x, UTM_y = t_to_utm.transform(drone_lon, drone_lat)
-    # Use DEM for ground height under drone
-    ground_elev = dem_height(drone_lat, drone_lon)
+
+    # Use DEM + 1m extra for solar panels
+    ground_elev = dem_height(drone_lat, drone_lon) + panel_height_m
+
     ray_origin = np.array([UTM_x, UTM_y, drone_alt], dtype=float)
     ground_z = ground_elev
+
     intersection_raw = intersect_ray_with_plane(ray_origin, dir_enu, ground_z)
 
+    intersection_corr = apply_heading_relative_offset(
+        intersection_raw, yaw,
+        forward_m=corr_forward_m,
+        right_m=corr_right_m,
+        up_m=corr_up_m
+    )
 
-    intersection_corr = apply_heading_relative_offset(intersection_raw, yaw,
-            forward_m=corr_forward_m,
-            right_m=corr_right_m,
-            up_m=corr_up_m)
     lon_out, lat_out = t_from_utm.transform(intersection_corr[0], intersection_corr[1])
     return (lat_out, lon_out), intersection_corr, intersection_raw
+
 
 def show_image_with_buttons(img_array, u, v, filename):
     img_with_dot = img_array.copy()
@@ -278,8 +289,9 @@ if __name__ == "__main__":
         exif_dict = piexif.load(file_path)
 
 
-    yaw, pitch, roll, alt_above_ground = parse_description_from_exif(exif_dict)
+    yaw, pitch, roll = parse_description_from_exif(exif_dict)
     drone_lat, drone_lon, drone_alt = extract_gps_from_exif(exif_dict)
+
     print("Drone GPS (original):", drone_lat, drone_lon, drone_alt)
     print("Yaw/Pitch/Roll (deg):", yaw, pitch, roll)
 
