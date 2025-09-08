@@ -10,6 +10,8 @@ import piexif
 from pyquaternion import Quaternion
 from plot_maps import plot_google_maps
 from plot_cad import plot_cad_map
+import rasterio
+from rasterio.transform import rowcol
 
 # ---------------- Camera Parameters ----------------
 K = np.array([[765.0, 0, 320.0],
@@ -23,6 +25,19 @@ corr_forward = -13.0
 corr_right   = -18.0 
 corr_up      = 0.0
 
+
+
+# ---------------- Load DEM ----------------
+dem_path = "output_SRTMGL1Ellip.tif"
+dem = rasterio.open(dem_path)
+
+
+def dem_height(lat, lon):
+    row, col = rowcol(dem.transform, lon, lat)
+    row = np.clip(row, 0, dem.height - 1)
+    col = np.clip(col, 0, dem.width - 1)
+    height = dem.read(1)[row, col]
+    return float(height)
 # ---------------- Utility Functions ----------------
 def rational_to_float(r):
     try:
@@ -163,7 +178,7 @@ def rotation_matrix_from_rpy(roll_deg: float, pitch_deg: float, yaw_deg: float):
 def intersect_ray_with_plane(ray_origin, ray_dir, ground_z):
     dz = ray_dir[2]
     if abs(dz) < 1e-9:
-        raise ValueError("Ray parallel to ground; cannot intersect.")
+            raise ValueError("Ray parallel to ground; cannot intersect.")
     t = (ground_z - ray_origin[2]) / dz
     if t <= 0:
         raise ValueError("Intersection is behind the camera (t <= 0).")
@@ -192,26 +207,34 @@ def latlon_apply_heading_offset(lat, lon, yaw_deg, forward_m=0.0, right_m=0.0, u
     lon_c, lat_c = t_from_utm.transform(float(utm_corrected[0]), float(utm_corrected[1]))
     return lat_c, lon_c, utm_corrected
 
-def pixel_to_ENU_quat(u, v, drone_gps, drone_alt, alt_above_ground,
-                      yaw, pitch, roll, K=K,
-                      corr_forward_m=0.0, corr_right_m=0.0, corr_up_m=0.0):
+def pixel_to_ENU_quat(u, v, drone_gps, drone_alt, yaw, pitch, roll, K=K,
+    corr_forward_m=0.0, corr_right_m=0.0, corr_up_m=0.0):
     dir_cam = pixel_dir_from_K(u, v, K)
     R = rotation_matrix_from_rpy(roll, pitch, yaw)
     dir_enu = R @ dir_cam
+
+
     drone_lat, drone_lon = drone_gps
     zone = int((drone_lon + 180.0) / 6.0) + 1
     epsg_code = 32600 + zone if drone_lat >= 0 else 32700 + zone
     utm_crs = pyproj.CRS.from_epsg(epsg_code)
     t_to_utm = pyproj.Transformer.from_crs("EPSG:4326", utm_crs, always_xy=True)
     t_from_utm = pyproj.Transformer.from_crs(utm_crs, "EPSG:4326", always_xy=True)
+
+
+    # Convert drone GPS to UTM
     UTM_x, UTM_y = t_to_utm.transform(drone_lon, drone_lat)
+    # Use DEM for ground height under drone
+    ground_elev = dem_height(drone_lat, drone_lon)
     ray_origin = np.array([UTM_x, UTM_y, drone_alt], dtype=float)
-    ground_z = drone_alt - alt_above_ground
+    ground_z = ground_elev
     intersection_raw = intersect_ray_with_plane(ray_origin, dir_enu, ground_z)
+
+
     intersection_corr = apply_heading_relative_offset(intersection_raw, yaw,
-                                                      forward_m=corr_forward_m,
-                                                      right_m=corr_right_m,
-                                                      up_m=corr_up_m)
+            forward_m=corr_forward_m,
+            right_m=corr_right_m,
+            up_m=corr_up_m)
     lon_out, lat_out = t_from_utm.transform(intersection_corr[0], intersection_corr[1])
     return (lat_out, lon_out), intersection_corr, intersection_raw
 
@@ -254,11 +277,12 @@ if __name__ == "__main__":
     except Exception:
         exif_dict = piexif.load(file_path)
 
+
     yaw, pitch, roll, alt_above_ground = parse_description_from_exif(exif_dict)
     drone_lat, drone_lon, drone_alt = extract_gps_from_exif(exif_dict)
     print("Drone GPS (original):", drone_lat, drone_lon, drone_alt)
     print("Yaw/Pitch/Roll (deg):", yaw, pitch, roll)
-    print("Alt above ground (m):", alt_above_ground)
+
 
     img_array = np.array(img)
     if img_array.dtype == np.uint16:
@@ -266,58 +290,45 @@ if __name__ == "__main__":
     if len(img_array.shape) == 2:
         img_array = cv2.cvtColor(img_array, cv2.COLOR_GRAY2BGR)
 
+    ground_elev = dem_height(drone_lat, drone_lon)
+    print("DEM height under drone (ellipsoid):", ground_elev, "m")
+
+
     u, v = select_pixel(img_array)
     drone_gps = (drone_lat, drone_lon)
 
-    # Compute projections with the chosen correction
+
     target_gps, enu_corr, enu_raw = pixel_to_ENU_quat(
-        u, v, drone_gps, drone_alt,
-        alt_above_ground, yaw, pitch, roll,
-        corr_forward_m=corr_forward,
-        corr_right_m=corr_right,
-        corr_up_m=corr_up
+    u, v, drone_gps, drone_alt, yaw, pitch, roll,
+    corr_forward_m=corr_forward, corr_right_m=corr_right, corr_up_m=corr_up
     )
-    print("Target GPS (corrected):", target_gps)
+    print("Target GPS (corrected with DEM):", target_gps)
 
 
-    # Corners (each corner projection uses same correction)
+    # Corners
     corners_px = [(0, 0), (width - 1, 0), (width - 1, height - 1), (0, height - 1)]
     corner_gps = []
     for x, y in corners_px:
         try:
             gps, enu_c, enu_r = pixel_to_ENU_quat(
-                x, y, drone_gps, drone_alt,
-                alt_above_ground, yaw, pitch, roll,
-                corr_forward_m=corr_forward,
-                corr_right_m=corr_right,
-                corr_up_m=corr_up
+            x, y, drone_gps, drone_alt, yaw, pitch, roll,
+            corr_forward_m=corr_forward, corr_right_m=corr_right, corr_up_m=corr_up
             )
             corner_gps.append(gps)
         except Exception:
             corner_gps.append(None)
 
-    # Shift the drone GPS marker itself for plotting consistency
+
     drone_lat_corr, drone_lon_corr, drone_utm_corr = latlon_apply_heading_offset(
-        drone_lat, drone_lon, yaw,
-        forward_m=corr_forward, right_m=corr_right, up_m=corr_up
+    drone_lat, drone_lon, yaw,
+    forward_m=corr_forward, right_m=corr_right, up_m=corr_up
     )
     drone_gps_corrected = (drone_lat_corr, drone_lon_corr)
-    print("Drone GPS (corrected for plotting):", drone_gps_corrected)
 
-    # Plot Google Maps
-    plot_google_maps(
-        target_gps=target_gps,
-        corner_gps=corner_gps,
-        drone_gps=drone_gps_corrected
-    )
-    # To plot CAD map (also uses corrected drone & target positions)
-    plot_cad_map(
-        target_gps=target_gps,
-        corner_gps=corner_gps,
-        drone_gps=drone_gps_corrected
-    )
-    # Draw marker in image and show
+
+    plot_google_maps(target_gps=target_gps, corner_gps=corner_gps, drone_gps=drone_gps_corrected)
+    plot_cad_map(target_gps=target_gps, corner_gps=corner_gps, drone_gps=drone_gps_corrected)
+
+
     cv2.circle(img_array, (u, v), radius=5, color=(0, 0, 255), thickness=-1)
     show_image_with_buttons(img_array, u, v, filename=file_path)
-
-
