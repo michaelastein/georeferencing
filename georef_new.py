@@ -16,19 +16,11 @@ K = np.array([[765.0, 0, 320.0],
               [0, 760.0, 256.0],
               [0, 0, 1.0]])
 
-R_C_to_G = np.array([[0, 0, 1],
-                     [1, 0, 0],
-                     [0, 1, 0]])
-T_C_to_G = np.zeros((3, 1))
-R_G_to_UAS = np.eye(3)
-T_G_to_UAS = np.array([[0.02], [0.0], [0.20]])
-R_NED_to_ENU = np.array([[1, 0, 0],
-                         [0, -1, 0],
-                         [0, 0, 1]])
+
 
 # --- drift / correction in (Forward, Right, Up) depending on drone heading ---
 corr_forward = -13.0
-corr_right   = -17.5  # example: 20 m left relative to heading
+corr_right   = -18.0 
 corr_up      = 0.0
 
 # ---------------- Utility Functions ----------------
