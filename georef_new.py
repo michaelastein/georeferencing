@@ -14,16 +14,26 @@ import rasterio
 from rasterio.transform import rowcol
 
 # ---------------- Camera Parameters ----------------
-K = np.array([[765.0, 0, 320.0],
-              [0, 760.0, 256.0],
-              [0, 0, 1.0]])
+# compute K from FOV
+W, H = 640, 512
+fx = (W / 2.0) / np.tan(np.radians(45.0 / 2.0))
+fy = (H / 2.0) / np.tan(np.radians(37.0 / 2.0))
+cx = (W - 1) / 2.0
+cy = (H - 1) / 2.0
+K = np.array([[fx, 0.0, cx],
+              [0.0, fy, cy],
+              [0.0, 0.0, 1.0]], dtype=float)
+
+
 
 
 
 # --- drift / correction in (Forward, Right, Up) depending on drone heading ---
-corr_forward = -12.8
-corr_right   = -16.5 
+corr_forward = -13
+corr_right   = -13
 corr_up      = 0.0
+
+panel_height= 2  # optional: add height of solar panels
 
 
 
@@ -32,7 +42,8 @@ dem_path = "output_hh.tif"
 dem = rasterio.open(dem_path)
 
 
-def dem_height(lat, lon):
+def dem_height(gps):
+    lat, lon = gps
     row, col = rowcol(dem.transform, lon, lat)
     row = np.clip(row, 0, dem.height - 1)
     col = np.clip(col, 0, dem.width - 1)
@@ -65,30 +76,29 @@ def rotation_quaternion_yaw_pitch_roll(yaw_deg, pitch_deg, roll_deg):
     q_roll = Quaternion(axis=[1, 0, 0], angle=r)
     return q_yaw * q_pitch * q_roll
 
-def load_image():
-    root = tk.Tk()
-    root.withdraw()
-    file_path = filedialog.askopenfilename(
-        title="Select an image",
-        filetypes=[("Image files", "*.jpg *.jpeg *.png *.tif *.tiff *.bmp"), ("All files", "*.*")]
-    )
-    if not file_path:
-        print("No image selected. Exiting program.")
-        sys.exit(0)
-    img = Image.open(file_path)
-    print("Loaded:", file_path)
-    return img, file_path
+def load_image(file_dialog=True, path=None):
+    if file_dialog:
+        root = tk.Tk()
+        root.withdraw()
+        path = tk.filedialog.askopenfilename(
+            title="Select an image",
+            filetypes=[("Image files", "*.jpg *.jpeg *.png *.tif *.tiff *.bmp")]
+        )
+        if not path:
+            print("No image selected. Exiting.")
+            sys.exit(0)
+    img = Image.open(path)
+    try:
+        exif_dict = piexif.load(img.info['exif']) if 'exif' in img.info else piexif.load(path)
+    except Exception:
+        exif_dict = piexif.load(path)
+    return img, path, exif_dict
 
 def parse_description_from_exif(exif_dict):
-    """
-    Extract yaw, pitch, and roll from the ImageDescription in EXIF.
-    """
     desc = exif_dict.get('0th', {}).get(piexif.ImageIFD.ImageDescription, b'')
     if isinstance(desc, bytes):
         desc = desc.decode(errors='ignore')
-
     yaw = pitch = roll = None
-
     if desc:
         for part in str(desc).split(","):
             kv = part.strip().split("=")
@@ -104,10 +114,8 @@ def parse_description_from_exif(exif_dict):
                         roll = float(value)
                 except ValueError:
                     pass
-
     if yaw is None or pitch is None or roll is None:
-        raise ValueError("Missing yaw, pitch, or roll in image description.")
-
+        raise ValueError("Missing yaw/pitch/roll in EXIF description.")
     return yaw, pitch, roll
 
 
@@ -152,6 +160,8 @@ def select_pixel(img_array):
     u = clicked_point.get('u', width // 2)
     v = clicked_point.get('v', height // 2)
     return u, v
+
+
 
 # ---------------- Math functions ----------------
 def pixel_dir_from_K(u, v, K):
@@ -211,11 +221,20 @@ def latlon_apply_heading_offset(lat, lon, yaw_deg, forward_m=0.0, right_m=0.0, u
     utm_xyz = np.array([utm_x, utm_y, utm_z], dtype=float)
     utm_corrected = apply_heading_relative_offset(utm_xyz, yaw_deg, forward_m=forward_m, right_m=right_m, up_m=up_m)
     lon_c, lat_c = t_from_utm.transform(float(utm_corrected[0]), float(utm_corrected[1]))
-    return lat_c, lon_c, utm_corrected
+    return lat_c, lon_c
+
+def get_corrected_drone_gps(exif_dict, forward_m=corr_forward, right_m=corr_right, up_m=corr_up):
+    drone_lat, drone_lon, drone_alt = extract_gps_from_exif(exif_dict)
+    yaw, pitch, roll = parse_description_from_exif(exif_dict)
+    drone_gps_corrected = latlon_apply_heading_offset(drone_lat, drone_lon, yaw,
+                                                      forward_m=forward_m,
+                                                      right_m=right_m,
+                                                      up_m=up_m)
+    return drone_gps_corrected, (drone_lat, drone_lon, drone_alt), (yaw, pitch, roll)
 
 def pixel_to_ENU_quat(u, v, drone_gps, drone_alt, yaw, pitch, roll, K=K,
     corr_forward_m=0.0, corr_right_m=0.0, corr_up_m=0.0,
-    panel_height_m=1.0):  # optional: add height of solar panels
+    panel_height_m=panel_height):  # optional: add height of solar panels
     dir_cam = pixel_dir_from_K(u, v, K)
     R = rotation_matrix_from_rpy(roll, pitch, yaw)
     dir_enu = R @ dir_cam
@@ -279,68 +298,67 @@ def show_image_with_buttons(img_array, u, v, filename):
     update_image()
     root.mainloop()
 
-# ---------------- Main ----------------
 if __name__ == "__main__":
-    img, file_path = load_image()
-    width, height = img.size
-    try:
-        exif_dict = piexif.load(img.info['exif']) if 'exif' in img.info else piexif.load(file_path)
-    except Exception:
-        exif_dict = piexif.load(file_path)
-
-
-    yaw, pitch, roll = parse_description_from_exif(exif_dict)
-    drone_lat, drone_lon, drone_alt = extract_gps_from_exif(exif_dict)
-
-    print("Drone GPS (original):", drone_lat, drone_lon, drone_alt)
-    print("Yaw/Pitch/Roll (deg):", yaw, pitch, roll)
-
-
+    # ---------------- Load image and EXIF ----------------
+    img, file_path, exif_dict = load_image()
     img_array = np.array(img)
     if img_array.dtype == np.uint16:
         img_array = (img_array / 256).astype(np.uint8)
     if len(img_array.shape) == 2:
         img_array = cv2.cvtColor(img_array, cv2.COLOR_GRAY2BGR)
 
-    ground_elev = dem_height(drone_lat, drone_lon)
+    # ---------------- Compute corrected drone GPS ----------------
+    drone_gps_corrected, drone_gps_raw, drone_pose = get_corrected_drone_gps(exif_dict)
+    yaw, pitch, roll = drone_pose
+    print("Drone GPS (original):", drone_gps_raw)
+    print("Corrected Drone GPS:", drone_gps_corrected)
+    print("Drone yaw/pitch/roll:", drone_pose)
+
+    # ---------------- DEM height under drone ----------------
+    ground_elev = dem_height(drone_gps_corrected)
     print("DEM height under drone (ellipsoid):", ground_elev, "m")
 
-
+    # ---------------- Interactive pixel selection ----------------
     u, v = select_pixel(img_array)
-    drone_gps = (drone_lat, drone_lon)
+    print("Selected pixel:", u, v)
 
-
+    # ---------------- Compute target GPS from selected pixel ----------------
     target_gps, enu_corr, enu_raw = pixel_to_ENU_quat(
-    u, v, drone_gps, drone_alt, yaw, pitch, roll,
-    corr_forward_m=corr_forward, corr_right_m=corr_right, corr_up_m=corr_up
+        u, v,
+        drone_gps_raw[:2],
+        drone_gps_raw[2],
+        yaw, pitch, roll,
+        corr_forward_m=corr_forward,
+        corr_right_m=corr_right,
+        corr_up_m=corr_up,
+        panel_height_m=panel_height
     )
     print("Target GPS (corrected with DEM):", target_gps)
 
-
-    # Corners
-    corners_px = [(0, 0), (width - 1, 0), (width - 1, height - 1), (0, height - 1)]
+    # ---------------- Compute corner GPS ----------------
+    width, height = img.size
+    corners_px = [(0, 0), (width-1, 0), (width-1, height-1), (0, height-1)]
     corner_gps = []
     for x, y in corners_px:
         try:
-            gps, enu_c, enu_r = pixel_to_ENU_quat(
-            x, y, drone_gps, drone_alt, yaw, pitch, roll,
-            corr_forward_m=corr_forward, corr_right_m=corr_right, corr_up_m=corr_up
+            gps, _, _ = pixel_to_ENU_quat(
+                x, y,
+                drone_gps_raw[:2],
+                drone_gps_raw[2],
+                yaw, pitch, roll,
+                corr_forward_m=corr_forward,
+                corr_right_m=corr_right,
+                corr_up_m=corr_up,
+                panel_height_m=panel_height
             )
             corner_gps.append(gps)
         except Exception:
             corner_gps.append(None)
 
-
-    drone_lat_corr, drone_lon_corr, drone_utm_corr = latlon_apply_heading_offset(
-    drone_lat, drone_lon, yaw,
-    forward_m=corr_forward, right_m=corr_right, up_m=corr_up
-    )
-    drone_gps_corrected = (drone_lat_corr, drone_lon_corr)
-
-
+    # ---------------- Plot maps ----------------
     plot_google_maps(target_gps=target_gps, corner_gps=corner_gps, drone_gps=drone_gps_corrected)
     plot_cad_map(target_gps=target_gps, corner_gps=corner_gps, drone_gps=drone_gps_corrected)
 
-
+    # ---------------- Show image with marked target ----------------
     cv2.circle(img_array, (u, v), radius=5, color=(0, 0, 255), thickness=-1)
-    show_image_with_buttons(img_array, u, v, filename=file_path)
+    show_image_with_buttons(img_array, u, v, file_path)
