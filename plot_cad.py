@@ -2,9 +2,9 @@ import folium
 import webbrowser
 import os
 import json
-from cad_registration import cad_map
+from cad_registration import CAD_MAP
 
-def plot_cad_map(target_gps, corner_gps=None, drone_gps=None,geojson_file= cad_map, map_file="target_map_cad.html"):
+def plot_cad_map(target_gps, corner_gps=None, drone_gps=None,geojson_file= CAD_MAP, map_file="target_map_cad.html"):
     """
     Plots the target, drone, and corners on a folium map using a GeoJSON CAD file as background.
 
