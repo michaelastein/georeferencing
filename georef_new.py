@@ -18,26 +18,21 @@ K = np.array([[765.0, 0, 320.0],
               [0, 760.0, 256.0],
               [0, 0, 1.0]])
 
-
-
-# --- drift / correction in (Forward, Right, Up) depending on drone heading ---
-corr_forward = -12.8
-corr_right   = -16.5 
+# --- correction in (Forward, Right, Up) relative to drone heading ---
+corr_forward = -18.0
+corr_right   = -35.0
 corr_up      = 0.0
-
-
 
 # ---------------- Load DEM ----------------
 dem_path = "output_hh.tif"
 dem = rasterio.open(dem_path)
 
-
 def dem_height(lat, lon):
     row, col = rowcol(dem.transform, lon, lat)
     row = np.clip(row, 0, dem.height - 1)
     col = np.clip(col, 0, dem.width - 1)
-    height = dem.read(1)[row, col]
-    return float(height)
+    return float(dem.read(1)[row, col])
+
 # ---------------- Utility Functions ----------------
 def rational_to_float(r):
     try:
@@ -56,14 +51,39 @@ def gps_to_decimal(coord, ref):
         val = -val
     return val
 
-def rotation_quaternion_yaw_pitch_roll(yaw_deg, pitch_deg, roll_deg):
-    y = np.radians(yaw_deg)
-    p = np.radians(pitch_deg)
+def rotation_matrix_from_rpy(roll_deg, pitch_deg, yaw_deg):
+    """
+    Converts roll, pitch, yaw (in degrees) from EXIF to ENU rotation matrix.
+    Camera frame: x=right, y=down, z=forward
+    ENU frame: x=east, y=north, z=up
+    """
     r = np.radians(roll_deg)
-    q_yaw = Quaternion(axis=[0, 0, 1], angle=y)
-    q_pitch = Quaternion(axis=[0, 1, 0], angle=p)
-    q_roll = Quaternion(axis=[1, 0, 0], angle=r)
-    return q_yaw * q_pitch * q_roll
+    p = np.radians(pitch_deg)
+    y = np.radians(yaw_deg)
+
+    # Camera to drone body
+    Rx = np.array([[1,0,0],
+                   [0,np.cos(r), -np.sin(r)],
+                   [0,np.sin(r), np.cos(r)]])
+    Ry = np.array([[np.cos(p),0,np.sin(p)],
+                   [0,1,0],
+                   [-np.sin(p),0,np.cos(p)]])
+    R_cam = Rx @ Ry
+
+    # Convert camera frame to ENU
+    # Camera: x=right, y=down, z=forward → ENU: x=east, y=north, z=up
+    R_swap = np.array([[0,1,0],
+                       [1,0,0],
+                       [0,0,-1]])
+    R_cam2enu = R_swap @ R_cam
+
+    # Apply yaw (rotate around ENU z-axis)
+    cy, sy = np.cos(y), np.sin(y)
+    R_yaw = np.array([[cy, -sy,0],
+                      [sy, cy,0],
+                      [0,0,1]])
+
+    return R_yaw @ R_cam2enu
 
 def load_image():
     root = tk.Tk()
@@ -80,15 +100,10 @@ def load_image():
     return img, file_path
 
 def parse_description_from_exif(exif_dict):
-    """
-    Extract yaw, pitch, and roll from the ImageDescription in EXIF.
-    """
     desc = exif_dict.get('0th', {}).get(piexif.ImageIFD.ImageDescription, b'')
     if isinstance(desc, bytes):
         desc = desc.decode(errors='ignore')
-
     yaw = pitch = roll = None
-
     if desc:
         for part in str(desc).split(","):
             kv = part.strip().split("=")
@@ -104,12 +119,9 @@ def parse_description_from_exif(exif_dict):
                         roll = float(value)
                 except ValueError:
                     pass
-
     if yaw is None or pitch is None or roll is None:
         raise ValueError("Missing yaw, pitch, or roll in image description.")
-
     return yaw, pitch, roll
-
 
 def extract_gps_from_exif(exif_dict):
     gps_ifd = exif_dict.get("GPS", {})
@@ -126,13 +138,10 @@ def extract_gps_from_exif(exif_dict):
     lat = gps_to_decimal(lat_tag, lat_ref)
     lon = gps_to_decimal(lon_tag, lon_ref)
     alt = rational_to_float(alt_tag)
-    try:
-        if isinstance(alt_ref, (bytes, bytearray)):
-            alt_ref_val = int(alt_ref[0])
-        else:
-            alt_ref_val = int(alt_ref)
-    except Exception:
-        alt_ref_val = 0
+    if isinstance(alt_ref, (bytes, bytearray)):
+        alt_ref_val = int(alt_ref[0])
+    else:
+        alt_ref_val = int(alt_ref)
     if alt_ref_val == 1:
         alt = -alt
     return lat, lon, alt
@@ -149,109 +158,73 @@ def select_pixel(img_array):
     cv2.waitKey(0)
     cv2.destroyAllWindows()
     width, height = img_array.shape[1], img_array.shape[0]
-    u = clicked_point.get('u', width // 2)
-    v = clicked_point.get('v', height // 2)
+    u = clicked_point.get('u', width//2)
+    v = clicked_point.get('v', height//2)
     return u, v
 
-# ---------------- Math functions ----------------
 def pixel_dir_from_K(u, v, K):
-    pix = np.array([u, v, 1.0])
+    pix = np.array([u,v,1.0])
     dir_cam = np.linalg.inv(K) @ pix
-    dir_cam = dir_cam.flatten()
-    return dir_cam / np.linalg.norm(dir_cam)
-
-def rotation_matrix_from_rpy(roll_deg: float, pitch_deg: float, yaw_deg: float):
-    r = np.radians(roll_deg)
-    p = np.radians(pitch_deg)
-    y = np.radians(yaw_deg)
-    Rx = np.array([[1, 0, 0],
-                   [0, np.cos(r), -np.sin(r)],
-                   [0, np.sin(r), np.cos(r)]])
-    Ry = np.array([[np.cos(p), 0, np.sin(p)],
-                   [0, 1, 0],
-                   [-np.sin(p), 0, np.cos(p)]])
-    cy = np.cos(-y)
-    sy = np.sin(-y)
-    Rz = np.array([[cy, -sy, 0],
-                   [sy, cy, 0],
-                   [0, 0, 1]])
-    R0 = np.array([[1, 0, 0],
-                   [0, -1, 0],
-                   [0, 0, -1]])
-    R_cam_att = Rx @ Ry
-    return Rz @ R0 @ R_cam_att
+    return dir_cam.flatten() / np.linalg.norm(dir_cam)
 
 def intersect_ray_with_plane(ray_origin, ray_dir, ground_z):
     dz = ray_dir[2]
     if abs(dz) < 1e-9:
-            raise ValueError("Ray parallel to ground; cannot intersect.")
+        dz = 1e-6
     t = (ground_z - ray_origin[2]) / dz
     if t <= 0:
-        raise ValueError("Intersection is behind the camera (t <= 0).")
+        t = 1e-3
     return ray_origin + t * ray_dir
 
-# --- General correction relative to drone heading ---
-def apply_heading_relative_offset(intersection_utm, yaw_deg,
-                                  forward_m=0.0, right_m=0.0, up_m=0.0):
+def apply_heading_relative_offset(intersection_utm, yaw_deg, forward_m=0.0, right_m=0.0, up_m=0.0):
     yaw_rad = np.radians(yaw_deg)
-    fwd_enu = np.array([np.sin(yaw_rad), np.cos(yaw_rad), 0.0])
-    right_enu = np.array([np.cos(yaw_rad), -np.sin(yaw_rad), 0.0])
-    up_enu = np.array([0.0, 0.0, 1.0])
-    offset = forward_m * fwd_enu + right_m * right_enu + up_m * up_enu
+    fwd_enu = np.array([np.sin(yaw_rad), np.cos(yaw_rad),0])
+    right_enu = np.array([np.cos(yaw_rad), -np.sin(yaw_rad),0])
+    up_enu = np.array([0,0,1])
+    offset = forward_m*fwd_enu + right_m*right_enu + up_m*up_enu
     return intersection_utm + offset
 
 def latlon_apply_heading_offset(lat, lon, yaw_deg, forward_m=0.0, right_m=0.0, up_m=0.0):
-    zone = int((lon + 180.0) / 6.0) + 1
-    epsg_code = 32600 + zone if lat >= 0 else 32700 + zone
+    zone = int((lon+180)/6)+1
+    epsg_code = 32600 + zone if lat>=0 else 32700+zone
     utm_crs = pyproj.CRS.from_epsg(epsg_code)
     t_to_utm = pyproj.Transformer.from_crs("EPSG:4326", utm_crs, always_xy=True)
     t_from_utm = pyproj.Transformer.from_crs(utm_crs, "EPSG:4326", always_xy=True)
     utm_x, utm_y = t_to_utm.transform(lon, lat)
-    utm_z = 0.0
+    utm_z = 0
     utm_xyz = np.array([utm_x, utm_y, utm_z], dtype=float)
-    utm_corrected = apply_heading_relative_offset(utm_xyz, yaw_deg, forward_m=forward_m, right_m=right_m, up_m=up_m)
-    lon_c, lat_c = t_from_utm.transform(float(utm_corrected[0]), float(utm_corrected[1]))
-    return lat_c, lon_c, utm_corrected
+    utm_corr = apply_heading_relative_offset(utm_xyz, yaw_deg, forward_m, right_m, up_m)
+    lon_c, lat_c = t_from_utm.transform(float(utm_corr[0]), float(utm_corr[1]))
+    return lat_c, lon_c, utm_corr
 
 def pixel_to_ENU_quat(u, v, drone_gps, drone_alt, yaw, pitch, roll, K=K,
-    corr_forward_m=0.0, corr_right_m=0.0, corr_up_m=0.0,
-    panel_height_m=1.0):  # optional: add height of solar panels
-    dir_cam = pixel_dir_from_K(u, v, K)
+                      corr_forward_m=0.0, corr_right_m=0.0, corr_up_m=0.0,
+                      panel_height_m=1.0):
+    dir_cam = pixel_dir_from_K(u,v,K)
     R = rotation_matrix_from_rpy(roll, pitch, yaw)
     dir_enu = R @ dir_cam
 
     drone_lat, drone_lon = drone_gps
-    zone = int((drone_lon + 180.0) / 6.0) + 1
-    epsg_code = 32600 + zone if drone_lat >= 0 else 32700 + zone
+    zone = int((drone_lon+180)/6)+1
+    epsg_code = 32600 + zone if drone_lat>=0 else 32700+zone
     utm_crs = pyproj.CRS.from_epsg(epsg_code)
     t_to_utm = pyproj.Transformer.from_crs("EPSG:4326", utm_crs, always_xy=True)
     t_from_utm = pyproj.Transformer.from_crs(utm_crs, "EPSG:4326", always_xy=True)
 
-    # Convert drone GPS to UTM
     UTM_x, UTM_y = t_to_utm.transform(drone_lon, drone_lat)
-
-    # Use DEM + 1m extra for solar panels
-    ground_elev = dem_height(drone_lat, drone_lon) + panel_height_m
-
+    ground_elev = dem_height(drone_lat, drone_lon)+panel_height_m
     ray_origin = np.array([UTM_x, UTM_y, drone_alt], dtype=float)
-    ground_z = ground_elev
-
-    intersection_raw = intersect_ray_with_plane(ray_origin, dir_enu, ground_z)
-
-    intersection_corr = apply_heading_relative_offset(
-        intersection_raw, yaw,
-        forward_m=corr_forward_m,
-        right_m=corr_right_m,
-        up_m=corr_up_m
-    )
-
+    intersection_raw = intersect_ray_with_plane(ray_origin, dir_enu, ground_elev)
+    intersection_corr = apply_heading_relative_offset(intersection_raw, yaw,
+                                                     forward_m=corr_forward_m,
+                                                     right_m=corr_right_m,
+                                                     up_m=corr_up_m)
     lon_out, lat_out = t_from_utm.transform(intersection_corr[0], intersection_corr[1])
     return (lat_out, lon_out), intersection_corr, intersection_raw
 
-
 def show_image_with_buttons(img_array, u, v, filename):
     img_with_dot = img_array.copy()
-    cv2.circle(img_with_dot, (u, v), radius=5, color=(0, 0, 255), thickness=-1)
+    cv2.circle(img_with_dot, (u,v), radius=5, color=(0,0,255), thickness=-1)
     pil_img = Image.fromarray(cv2.cvtColor(img_with_dot, cv2.COLOR_BGR2RGB))
     root = tk.Tk()
     root.title(os.path.basename(filename))
@@ -288,59 +261,47 @@ if __name__ == "__main__":
     except Exception:
         exif_dict = piexif.load(file_path)
 
-
     yaw, pitch, roll = parse_description_from_exif(exif_dict)
     drone_lat, drone_lon, drone_alt = extract_gps_from_exif(exif_dict)
-
     print("Drone GPS (original):", drone_lat, drone_lon, drone_alt)
     print("Yaw/Pitch/Roll (deg):", yaw, pitch, roll)
-
 
     img_array = np.array(img)
     if img_array.dtype == np.uint16:
         img_array = (img_array / 256).astype(np.uint8)
-    if len(img_array.shape) == 2:
+    if len(img_array.shape)==2:
         img_array = cv2.cvtColor(img_array, cv2.COLOR_GRAY2BGR)
 
     ground_elev = dem_height(drone_lat, drone_lon)
     print("DEM height under drone (ellipsoid):", ground_elev, "m")
 
-
     u, v = select_pixel(img_array)
     drone_gps = (drone_lat, drone_lon)
 
-
-    target_gps, enu_corr, enu_raw = pixel_to_ENU_quat(
-    u, v, drone_gps, drone_alt, yaw, pitch, roll,
-    corr_forward_m=corr_forward, corr_right_m=corr_right, corr_up_m=corr_up
-    )
+    target_gps, enu_corr, enu_raw = pixel_to_ENU_quat(u,v,drone_gps,drone_alt,yaw,pitch,roll,
+                                                      corr_forward_m=corr_forward,
+                                                      corr_right_m=corr_right,
+                                                      corr_up_m=corr_up)
     print("Target GPS (corrected with DEM):", target_gps)
 
-
     # Corners
-    corners_px = [(0, 0), (width - 1, 0), (width - 1, height - 1), (0, height - 1)]
+    corners_px = [(0,0),(width-1,0),(width-1,height-1),(0,height-1)]
     corner_gps = []
-    for x, y in corners_px:
-        try:
-            gps, enu_c, enu_r = pixel_to_ENU_quat(
-            x, y, drone_gps, drone_alt, yaw, pitch, roll,
-            corr_forward_m=corr_forward, corr_right_m=corr_right, corr_up_m=corr_up
-            )
-            corner_gps.append(gps)
-        except Exception:
-            corner_gps.append(None)
-
+    for x,y in corners_px:
+        gps, _, _ = pixel_to_ENU_quat(x,y,drone_gps,drone_alt,yaw,pitch,roll,
+                                      corr_forward_m=corr_forward,
+                                      corr_right_m=corr_right,
+                                      corr_up_m=corr_up)
+        corner_gps.append(gps)
 
     drone_lat_corr, drone_lon_corr, drone_utm_corr = latlon_apply_heading_offset(
-    drone_lat, drone_lon, yaw,
-    forward_m=corr_forward, right_m=corr_right, up_m=corr_up
+        drone_lat, drone_lon, yaw,
+        forward_m=corr_forward, right_m=corr_right, up_m=corr_up
     )
     drone_gps_corrected = (drone_lat_corr, drone_lon_corr)
-
 
     plot_google_maps(target_gps=target_gps, corner_gps=corner_gps, drone_gps=drone_gps_corrected)
     plot_cad_map(target_gps=target_gps, corner_gps=corner_gps, drone_gps=drone_gps_corrected)
 
-
-    cv2.circle(img_array, (u, v), radius=5, color=(0, 0, 255), thickness=-1)
-    show_image_with_buttons(img_array, u, v, filename=file_path)
+    cv2.circle(img_array, (u,v), radius=5, color=(0,0,255), thickness=-1)
+    show_image_with_buttons(img_array, u,v, filename=file_path)

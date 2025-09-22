@@ -3,7 +3,7 @@ Annotate images with geo information:
 
 
 # Make sure your terminal is in the folder with images and CSV
-$csvFile = "2025_08_21-03_27_13_PM_filtered.csv"
+$csvFile = "merged_tiff_pi_new.csv"
 
 # Import the CSV (comma-separated)
 $rows = Import-Csv $csvFile
