@@ -28,7 +28,7 @@ def plot_cad_map(target_gps, corner_gps=None, drone_gps=None, geojson_file=CAD_M
     # --- Check CRS and convert if needed ---
     crs_name = geojson_data.get("crs", {}).get("properties", {}).get("name", "EPSG:4326")
     if "4326" not in crs_name:  # Not WGS84
-        print(f"Reprojecting GeoJSON from {crs_name} to EPSG:4326")
+        #print(f"Reprojecting GeoJSON from {crs_name} to EPSG:4326")
         # Extract EPSG code from string (e.g., "urn:ogc:def:crs:EPSG::25829")
         epsg_code = crs_name.split(":")[-1]
         transformer = Transformer.from_crs(f"EPSG:{epsg_code}", "EPSG:4326", always_xy=True)

@@ -27,7 +27,7 @@ foreach ($row in $rows) {
     $lonRef = if ([double]$row.Longitude -ge 0) { "E" } else { "W" }
 
     # Build ImageDescription string
-    $description = "Yaw=$($row.GimbalYawE), Pitch=$($row.pitch_agisoft), Roll=$($row.roll), RelativeAlt=$($row.TAlt)"
+    $description = "Yaw=$($row.GimbalYawE), Pitch=$($row.pitch_agisoft), Roll=$($row.roll), RelativeAlt=$($row.CHeight)"
 
     Write-Host "Processing $imageFile ..."
 
