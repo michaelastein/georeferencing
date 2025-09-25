@@ -11,8 +11,8 @@ from plot_maps import plot_google_maps
 from plot_cad import plot_cad_map  # optional
 
 # ---------------- Camera Parameters ----------------
-K = np.array([[765.0, 0, 320.0],
-              [0, 760.0, 256.0],
+K = np.array([[764.7, 0, 320.0],
+              [0, 763.9, 256.0],
               [0, 0, 1.0]])
 
 # --- correction in (Forward, Right, Up) relative to drone heading ---
@@ -98,7 +98,8 @@ def apply_heading_relative_offset(intersection_utm, yaw_deg, forward_m=0.0, righ
     return intersection_utm + offset
 
 def pixel_to_ENU(u, v, drone_gps, drone_alt, rel_alt, yaw, pitch, roll,
-                 K=K, corr_forward_m=0.0, corr_right_m=0.0, corr_up_m=0.0):
+                 K=K, corr_forward_m=0.0, corr_right_m=0.0, corr_up_m=0.0,
+                 panel_height_m=2.0):  
     dir_cam = pixel_dir_from_K(u, v, K)
     R = rotation_matrix_from_rpy(roll, pitch, yaw)
     dir_enu = R @ dir_cam
@@ -111,7 +112,10 @@ def pixel_to_ENU(u, v, drone_gps, drone_alt, rel_alt, yaw, pitch, roll,
     t_from_utm = pyproj.Transformer.from_crs(utm_crs, "EPSG:4326", always_xy=True)
 
     UTM_x, UTM_y = t_to_utm.transform(drone_lon, drone_lat)
-    ground_elev = drone_alt - rel_alt
+    
+    # Reduce relative height by panel_height
+    ground_elev = drone_alt - (rel_alt - panel_height_m)
+
     ray_origin = np.array([UTM_x, UTM_y, drone_alt + corr_up_m], dtype=float)
 
     intersection_raw = intersect_ray_with_plane(ray_origin, dir_enu, ground_elev)
@@ -121,6 +125,7 @@ def pixel_to_ENU(u, v, drone_gps, drone_alt, rel_alt, yaw, pitch, roll,
                                                      up_m=corr_up_m)
     lon_out, lat_out = t_from_utm.transform(intersection_corr[0], intersection_corr[1])
     return (lat_out, lon_out), intersection_corr, intersection_raw
+
 
 # ---------------- EXIF & Image Functions ----------------
 def load_image():
