@@ -189,9 +189,15 @@ if __name__ == "__main__":
     cam.intrinsics(width, height, f_px, cx, cy)
 
     # ---------------- Extrinsics ----------------
-    cam_roll  = -roll
-    cam_pitch = -pitch + 90
-    cam_yaw   = yaw - 90
+    # Convert EXIF attitude to camproject convention
+    # camproject expects:
+    # - roll: positive clockwise
+    # - pitch: 0 = forward, positive = nose up
+    # - yaw: 0 = forward/north, positive = clockwise
+    cam_roll  = -roll            # roll usually flips
+    cam_pitch = 90 - pitch       # convert from EXIF to camproject pitch
+    cam_yaw   = -yaw -90           # flip yaw so positive = right turn
+
     ext = Extrinsics()
     ext.setPose(X=0, Y=0, Z=rel_alt)
     ext.setGimbal(roll=cam_roll, pitch=cam_pitch, yaw=cam_yaw)

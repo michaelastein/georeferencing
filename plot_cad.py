@@ -43,7 +43,16 @@ def plot_cad_map(target_gps, corner_gps=None, drone_gps=None, geojson_file=CAD_M
                 geom["coordinates"] = new_coords
 
     # --- Base map centered on target ---
-    m = folium.Map(location=[lat, lon], zoom_start=21)
+    m = folium.Map(
+        location=[lat, lon],
+        zoom_start=20,
+        min_zoom=15,
+        max_zoom=24,
+        tiles="https://stamen-tiles.a.ssl.fastly.net/terrain/{z}/{x}/{y}.jpg",
+        attr="Map tiles by Stamen Design, CC BY 3.0 — Map data © OpenStreetMap contributors"
+    )
+
+
 
     # --- Add GeoJSON layer ---
     folium.GeoJson(
