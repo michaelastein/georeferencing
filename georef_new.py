@@ -12,6 +12,8 @@ import pyproj
 from plot_maps import plot_google_maps
 from plot_cad import plot_cad_map  # optional
 
+panel_height = 2
+
 # ---------------- Utility Functions ----------------
 def rational_to_float(r):
     try:
@@ -190,18 +192,25 @@ if __name__ == "__main__":
 
     # ---------------- Extrinsics ----------------
     # Convert EXIF attitude to camproject convention
-    # camproject expects:
-    # - roll: positive clockwise
-    # - pitch: 0 = forward, positive = nose up
-    # - yaw: 0 = forward/north, positive = clockwise
-    cam_roll  = -roll            # roll usually flips
-    cam_pitch = 90 - pitch       # convert from EXIF to camproject pitch
-    cam_yaw   = -yaw -90           # flip yaw so positive = right turn
+ 
+    cam_roll  = roll           
+    cam_pitch = 90 + pitch      
+    cam_yaw   = -yaw +90          
 
     ext = Extrinsics()
-    ext.setPose(X=0, Y=0, Z=rel_alt)
-    ext.setGimbal(roll=cam_roll, pitch=cam_pitch, yaw=cam_yaw)
+    panel_correction = 0  # adjust if needed
+    ext.setPose(
+        X=0,
+        Y=0,
+        Z=rel_alt - panel_correction,
+        roll=-roll,
+        pitch=90 - pitch,
+        yaw=-yaw -90,
+        order="ZYX"
+    )
+    ext.setGimbal(roll=0, pitch=0, yaw=0, order="ZYX")  # no additional gimbal rotation
     cam.attitudeMat(ext.transform())
+
 
     # ---------------- Reproject to Ground Plane ----------------
     plane = np.array([0, 0, 1, 0])  # Z=0
@@ -209,15 +218,13 @@ if __name__ == "__main__":
     corners_px = np.array([[0,0],[width-1,0],[width-1,height-1],[0,height-1]])
     corners_3D = np.array([cam.reprojectToPlane(pixel_to_camproject(c[0], c[1], width, height), plane)[0:3] for c in corners_px])
 
-    print("Target ENU coordinates (meters):", target_3D[0:3])
-    print("Image corners ENU coordinates (meters):\n", corners_3D)
+
 
     # ---------------- ENU -> GPS ----------------
     target_lat, target_lon = enu_to_gps(target_3D[0], target_3D[1], drone_lat, drone_lon)
     corner_gps = [enu_to_gps(c[0], c[1], drone_lat, drone_lon) for c in corners_3D]
 
-    print("Target GPS:", target_lat, target_lon)
-    print("Corner GPS:", corner_gps)
+
 
     # ---------------- Plot ----------------
     plot_google_maps(target_gps=(target_lat, target_lon), corner_gps=corner_gps, drone_gps=(drone_lat, drone_lon))
