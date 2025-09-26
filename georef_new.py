@@ -12,7 +12,12 @@ import pyproj
 from plot_maps import plot_google_maps
 from plot_cad import plot_cad_map  # optional
 
-panel_height = 2
+# ---------------- User Parameters ----------------
+# These allow manual correction of the drone’s position and panel height
+DRONE_OFFSET_NORTH = -2.0   # meters: positive moves drone north
+DRONE_OFFSET_EAST  = 0.5    # meters: positive moves drone east
+DRONE_OFFSET_UP    = -2.0    # meters: positive moves drone up (altitude)
+PANEL_HEIGHT_CORRECTION = 2.0  # meters: height of the solar panel above ground
 
 # ---------------- Utility Functions ----------------
 def rational_to_float(r):
@@ -162,6 +167,7 @@ if __name__ == "__main__":
     img, file_path = load_image()
     width, height = img.size
 
+    # Load EXIF
     try:
         exif_dict = piexif.load(img.info['exif']) if 'exif' in img.info else piexif.load(file_path)
     except Exception:
@@ -191,26 +197,19 @@ if __name__ == "__main__":
     cam.intrinsics(width, height, f_px, cx, cy)
 
     # ---------------- Extrinsics ----------------
-    # Convert EXIF attitude to camproject convention
- 
-    cam_roll  = roll           
-    cam_pitch = 90 + pitch      
-    cam_yaw   = -yaw +90          
-
     ext = Extrinsics()
-    panel_correction = 0  # adjust if needed
+    corrected_altitude = rel_alt - PANEL_HEIGHT_CORRECTION + DRONE_OFFSET_UP
     ext.setPose(
-        X=0,
-        Y=0,
-        Z=rel_alt - panel_correction,
+        X=DRONE_OFFSET_EAST,
+        Y=DRONE_OFFSET_NORTH,
+        Z=corrected_altitude,
         roll=-roll,
         pitch=90 - pitch,
-        yaw=-yaw -90,
+        yaw=-yaw - 90,
         order="ZYX"
     )
-    ext.setGimbal(roll=0, pitch=0, yaw=0, order="ZYX")  # no additional gimbal rotation
+    ext.setGimbal(roll=0, pitch=0, yaw=0, order="ZYX")  # gimbal angles from EXIF are used
     cam.attitudeMat(ext.transform())
-
 
     # ---------------- Reproject to Ground Plane ----------------
     plane = np.array([0, 0, 1, 0])  # Z=0
@@ -218,17 +217,24 @@ if __name__ == "__main__":
     corners_px = np.array([[0,0],[width-1,0],[width-1,height-1],[0,height-1]])
     corners_3D = np.array([cam.reprojectToPlane(pixel_to_camproject(c[0], c[1], width, height), plane)[0:3] for c in corners_px])
 
-
-
     # ---------------- ENU -> GPS ----------------
     target_lat, target_lon = enu_to_gps(target_3D[0], target_3D[1], drone_lat, drone_lon)
     corner_gps = [enu_to_gps(c[0], c[1], drone_lat, drone_lon) for c in corners_3D]
 
-
+    # ---------------- Corrected Drone GPS ----------------
+    corrected_drone_lat, corrected_drone_lon = enu_to_gps(DRONE_OFFSET_EAST, DRONE_OFFSET_NORTH, drone_lat, drone_lon)
 
     # ---------------- Plot ----------------
-    plot_google_maps(target_gps=(target_lat, target_lon), corner_gps=corner_gps, drone_gps=(drone_lat, drone_lon))
-    plot_cad_map(target_gps=(target_lat, target_lon), corner_gps=corner_gps, drone_gps=(drone_lat, drone_lon))
+    plot_google_maps(
+        target_gps=(target_lat, target_lon),
+        corner_gps=corner_gps,
+        drone_gps=(corrected_drone_lat, corrected_drone_lon)
+    )
+    plot_cad_map(
+        target_gps=(target_lat, target_lon),
+        corner_gps=corner_gps,
+        drone_gps=(corrected_drone_lat, corrected_drone_lon)
+    )
 
     # ---------------- Show Image ----------------
     show_image_with_buttons(img_array, u, v, filename=file_path)
